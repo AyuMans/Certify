@@ -1,5 +1,5 @@
 # Academic Certificate Verification
-hi
+
 A Solidity academic project with a browser interface, Express API, and PostgreSQL database. The contract stores a SHA-256 fingerprint of each issued PDF; verification checks the exact file against the blockchain.
 
 ## Run from VS Code
