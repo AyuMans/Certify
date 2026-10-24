@@ -1,88 +1,35 @@
 import { ethers } from "ethers";
-import {
-  ownerContract,
-} from "./blockchainService.js";
+import { ownerContract } from "./blockchainService.js";
+import { acquireWriteLock } from "./chainWriteQueue.js";
+
+function validateAddress(value: string) {
+  if (typeof value !== "string" || !ethers.isAddress(value)) throw new Error("Enter a valid Ethereum address");
+  return ethers.getAddress(value);
+}
 
 export async function registerIssuer(issuerAddress: string) {
-  if (!issuerAddress) {
-    throw new Error("Issuer address is required");
-  }
-
-  if (!ethers.isAddress(issuerAddress)) {
-    throw new Error("Invalid Ethereum address");
-  }
-
-  const issuer = ethers.getAddress(issuerAddress);
-
-  const alreadyRegistered =
-    await ownerContract.authorizedIssuers(issuer);
-
-  if (alreadyRegistered) {
-    throw new Error("Issuer is already registered");
-  }
-
-  const transaction =
-    await ownerContract.registerIssuer(issuer);
-
-  const receipt = await transaction.wait();
-
-  return {
-    issuerAddress: issuer,
-    transactionHash: transaction.hash,
-    blockNumber: receipt?.blockNumber ?? null,
-    registered: true,
-  };
+  const issuer = validateAddress(issuerAddress);
+  const release = await acquireWriteLock();
+  try {
+    if (await ownerContract.authorizedIssuers(issuer)) throw new Error("Issuer is already registered");
+    const transaction = await ownerContract.registerIssuer(issuer);
+    const receipt = await transaction.wait();
+    return { issuerAddress: issuer, transactionHash: transaction.hash, blockNumber: receipt?.blockNumber ?? null, registered: true };
+  } finally { release(); }
 }
 
 export async function removeIssuer(issuerAddress: string) {
-  if (!issuerAddress) {
-    throw new Error("Issuer address is required");
-  }
-
-  if (!ethers.isAddress(issuerAddress)) {
-    throw new Error("Invalid Ethereum address");
-  }
-
-  const issuer = ethers.getAddress(issuerAddress);
-
-  const alreadyRegistered =
-    await ownerContract.authorizedIssuers(issuer);
-
-  if (!alreadyRegistered) {
-    throw new Error("Issuer is not registered");
-  }
-
-  const transaction =
-    await ownerContract.removeIssuer(issuer);
-
-  const receipt = await transaction.wait();
-
-  return {
-    issuerAddress: issuer,
-    transactionHash: transaction.hash,
-    blockNumber: receipt?.blockNumber ?? null,
-    registered: false,
-  };
+  const issuer = validateAddress(issuerAddress);
+  const release = await acquireWriteLock();
+  try {
+    if (!await ownerContract.authorizedIssuers(issuer)) throw new Error("Issuer is not registered");
+    const transaction = await ownerContract.removeIssuer(issuer);
+    const receipt = await transaction.wait();
+    return { issuerAddress: issuer, transactionHash: transaction.hash, blockNumber: receipt?.blockNumber ?? null, registered: false };
+  } finally { release(); }
 }
 
-export async function getIssuerStatus(
-  issuerAddress: string
-) {
-  if (!issuerAddress) {
-    throw new Error("Issuer address is required");
-  }
-
-  if (!ethers.isAddress(issuerAddress)) {
-    throw new Error("Invalid Ethereum address");
-  }
-
-  const issuer = ethers.getAddress(issuerAddress);
-
-  const registered =
-    await ownerContract.authorizedIssuers(issuer);
-
-  return {
-    issuerAddress: issuer,
-    registered,
-  };
+export async function getIssuerStatus(issuerAddress: string) {
+  const issuer = validateAddress(issuerAddress);
+  return { issuerAddress: issuer, registered: await ownerContract.authorizedIssuers(issuer) as boolean };
 }

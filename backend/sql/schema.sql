@@ -6,17 +6,4 @@ CREATE TABLE IF NOT EXISTS users (
   role VARCHAR(20) NOT NULL CHECK (role IN ('ADMIN', 'ISSUER', 'VERIFIER')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE TABLE IF NOT EXISTS certificates (
-  id SERIAL PRIMARY KEY,
-  certificate_id VARCHAR(100) UNIQUE NOT NULL,
-  certificate_hash VARCHAR(66) UNIQUE NOT NULL,
-  file_name VARCHAR(255) NOT NULL,
-  file_path TEXT NOT NULL,
-  issuer_address VARCHAR(42) NOT NULL,
-  transaction_hash VARCHAR(66) NOT NULL,
-  block_number BIGINT NOT NULL,
-  issued_at TIMESTAMPTZ NOT NULL,
-  revoked BOOLEAN NOT NULL DEFAULT FALSE,
-  revoked_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+-- Certificates and PDF buffers live only in the backend's memory.

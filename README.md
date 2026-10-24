@@ -1,113 +1,104 @@
-# Academic Certificate Verification
+# Academic Certificate Verification — demo mode
 
-A Solidity academic project with a browser interface, Express API, and PostgreSQL database. The contract stores a SHA-256 fingerprint of each issued PDF; verification checks the exact file against the blockchain.
+This college project uses Solidity, Node.js/Express and a simple HTML/CSS/JavaScript page. **Only staff accounts persist. Certificates, PDFs and their blockchain history live in memory and disappear when the backend process stops.**
 
-## Run from VS Code
+## Start the demo
 
-In the project-root terminal:
+From the project-root terminal:
 
 ```sh
 npm run dev:local
 ```
 
-Open **http://localhost:5000**. Keep the terminal running. The launcher compiles the contract/backend, creates missing database tables, ensures the configured admin exists, starts a local Hardhat node if needed, and deploys/authorizes the issuer if the configured contract is absent. It updates only `CONTRACT_ADDRESS` in `backend/.env` when deploying. Existing admin passwords and database records are preserved.
+Open **http://localhost:5000**. Keep this terminal running during the demo. Stop it with Ctrl+C when finished. Each new backend process starts with zero certificates and a freshly deployed contract. You can reuse the same certificate IDs and PDFs in the next run.
 
-Sign in with your existing admin account. For a new installation, the account comes from `ADMIN_EMAIL` and `ADMIN_PASSWORD` in `backend/.env`. Do not share this file.
+If an older server is already running, stop that process in its VS Code terminal before starting this version. Refresh the page afterward. The UI detects an old backend and asks for a restart.
 
-**Local Hardhat is temporary:** restarting its node loses blockchain records. PDFs and PostgreSQL records remain but cannot verify against a fresh chain. Keep the node running during a demonstration. The application never deletes old database records automatically.
+Existing user accounts and password hashes are kept in PostgreSQL. Sign in with your normal credentials; you do not need to recreate staff accounts for each demonstration. A valid login token can also remain usable while its normal eight-hour expiry and JWT secret are unchanged.
 
-## Basic features
+## What is persistent?
 
-- Public document verification: VALID, INVALID (unregistered or altered), and REVOKED.
-- Public hash lookup and on-chain issuance/revocation history.
-- Login with ADMIN, ISSUER, and VERIFIER roles.
-- Admin/issuer PDF issuance, certificate register, and authenticated downloads.
-- Admin-only revocation, staff creation, and blockchain issuer authorization/removal.
-- Recovery after a confirmed issuance fails to save metadata: retry the same PDF and ID.
-- Real database/blockchain health checks and automated contract/API tests.
+| Data | Storage | After stopping the backend |
+| --- | --- | --- |
+| Staff names, emails, roles and password hashes | PostgreSQL users table | Retained |
+| Login-token signing configuration | backend/.env | Retained |
+| Issued certificate metadata and academic fields | JavaScript Map | Lost |
+| Uploaded PDF bytes | Memory buffers | Lost |
+| Solidity records, corrections, revocations and event history | In-process Hardhat development chain | Lost |
 
-The baseline represents **one institution with a server-managed issuer wallet**. Staff accounts share that wallet through role-protected endpoints; they do not each have independent blockchain identities. Verifying a fingerprint confirms registration and revocation status, not the truth of the document's academic claims. Unique features and multi-institution wallets are left for the next stage.
+No certificate PDF is saved to disk and no certificate rows are inserted into PostgreSQL. On startup the backend also removes the legacy certificates table and old files from its dedicated backend/uploads directory. It does not delete the original files you selected from elsewhere on your computer.
+
+The development blockchain is created **inside the backend process** using Hardhat's isolated simulated network. No external node needs to be started or stopped. This is temporary local demo storage, not a way to erase records from a public blockchain. Separately launched old blockchain nodes are not used by this version.
+
+## Features available during each run
+
+- Exact-file verification: VALID, INVALID, REVOKED or SUPERSEDED.
+- Browser-side SHA-256 hashing: only the hash is sent during normal verification.
+- Separate comparison of manually entered academic details against their on-chain hash.
+- Staff login and ADMIN / ISSUER / VERIFIER permissions.
+- Admin/issuer issuance, session certificate list and authenticated PDF downloads.
+- Admin corrections linking previous and replacement certificates atomically.
+- Revocation and transaction history for the current demo session.
+
+Issuance requires a final PDF, unique certificate ID, student name, roll number, degree/course, department, graduation year and grade/CGPA. IDs and files must be unique within one run; they can be reused after restarting.
+
+Academic-field comparison is independent from file verification. It checks the values entered into that form and does not read PDF text or perform OCR. Matching fields never authenticates an unrelated uploaded PDF. Capitalization and repeated whitespace are normalized, while punctuation and grade formatting remain significant.
 
 ## Fresh installation
 
-Prerequisites: a supported Node.js version (22.13+), npm, and a running PostgreSQL server.
+Requirements: a supported Node.js version, npm, and a running PostgreSQL server.
 
 ```sh
 npm ci
 npm --prefix backend ci
 ```
 
-1. Create a PostgreSQL database, e.g. `certificate_verification`.
-2. Copy `backend/.env.example` to `backend/.env` and set `DATABASE_URL`.
-3. Set a random `JWT_SECRET`, admin name/email, and a password of at least 8 characters (maximum 72 UTF-8 bytes).
-4. Run `npm run chain` to see local Hardhat development accounts. Put the first two development keys into `OWNER_PRIVATE_KEY` and `ISSUER_PRIVATE_KEY`. These publicly known keys are only for local development, never live funds.
-5. Set `BLOCKCHAIN_RPC_URL=http://127.0.0.1:8545`; leave `CONTRACT_ADDRESS` empty for first deployment.
-6. Run `npm run dev:local`.
+Create a PostgreSQL database, copy backend/.env.example to backend/.env, and configure DATABASE_URL, JWT_SECRET and the initial admin's name, email and password. Then run npm run dev:local. The startup script builds Solidity/backend code, creates the users table if absent, ensures the configured admin exists without changing an existing password, and launches the fresh demo backend.
 
-Database setup creates missing tables, preserving existing records. It is not a migration engine for arbitrary schemas; the included schema matches this project's existing tables.
-
-## Demonstration
-
-1. Sign in as admin; check the issuer address in Administration.
-2. Issue a final PDF using a unique ID such as `ACV-2026-001`.
-3. Verify the original PDF: VALID.
-4. Verify an edited copy: INVALID.
-5. Copy its document hash into Find a record to inspect the on-chain details and history.
-6. Revoke that hash as admin; verify the original again: REVOKED.
-7. Create an ISSUER account to demonstrate that issuers can issue/download but cannot revoke certificates or manage accounts/wallets.
-
-Verification uploads are processed in memory and not saved. Issuance accepts a PDF header and a maximum 10 MB file; it does not validate academic content. Original PDFs are stored privately and require an admin/issuer login to download.
+Blockchain RPC URLs, saved contract addresses and private keys are no longer required by the demo server. Older values in an existing .env file are ignored by this runtime. The Solidity contract still runs in an Ethereum-compatible EVM, with development signers supplied by Hardhat.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `npm run dev:local` | Build, set up and start the complete local app |
-| `npm run chain` | Run the local chain separately |
-| `npm run deploy:local` | Deploy locally and authorize the configured issuer |
-| `npm run db:setup` | Create missing database tables |
-| `npm --prefix backend run create-admin` | Create the configured admin if absent |
-| `npm run build` | Compile Solidity |
-| `npm run sync:abi` | Update the backend ABI after compiling the contract |
-| `npm run typecheck` | Typecheck blockchain scripts/tests |
-| `npm run build:api` | Compile backend TypeScript |
-| `npm start` | Start the compiled backend and browser interface |
-| `npm test` | Run contract tests |
-| `npm run test:api` | Run real API/database/blockchain integration tests |
+| npm run dev:local | Build and start a fresh complete demo |
+| npm start | Start the already-built backend with a new temporary chain/session |
+| npm run dev | Run the backend in watch mode; each restart clears certificates |
+| npm run build | Compile Solidity |
+| npm run sync:abi | Copy the compiled contract ABI into the backend |
+| npm run build:api | Compile backend TypeScript |
+| npm run typecheck | Typecheck blockchain scripts/tests |
+| npm run db:setup | Create the persistent users table if absent |
+| npm --prefix backend run create-admin | Create the configured admin if absent |
+| npm --prefix backend run reset:certificates | Remove legacy disk/SQL certificate storage, preserving users |
+| npm test | Run the 35 contract tests |
+| npm run test:api | Run API tests and the real process-restart test |
 
-API tests start their own local chain on port 18546, deploy a separate contract, and use a randomly named PostgreSQL schema and temporary upload directory. They clean up afterward without touching application tables/PDFs. The database user needs CREATE SCHEMA permission. `TEST_RPC_URL` optionally selects another disposable local Hardhat chain.
+The reset command removes legacy storage only; a running backend's current in-memory certificates last until that backend stops. Tests use isolated PostgreSQL schemas and do not add test users to the actual users table. The restart test verifies that accounts survive a forced stop while certificate verification, downloads and event history reset and IDs can be reused.
 
-If compiler downloads/cache are unavailable, set optional `SOLC_PATH` to an installed **Solidity 0.8.34** native compiler or soljson file. Always compile before typechecking generated contract types.
+If compiler downloads/cache are unavailable, optional SOLC_PATH may point to an installed Solidity 0.8.34 compiler or soljson file. Compile before typechecking generated contract types.
 
-## API
+## Quick demonstration
 
-| Endpoint | Access |
-| --- | --- |
-| `POST /api/auth/login` | Public |
-| `GET /api/auth/me` | Signed in |
-| `POST /api/auth/users` | ADMIN |
-| `POST /api/certificates/issue` | ADMIN / ISSUER; multipart `certificate`, `certificateId` |
-| `POST /api/certificates/verify` | Public; multipart `certificate` |
-| `GET /api/certificates` | ADMIN / ISSUER; latest 100 saved records |
-| `GET /api/certificates/:hash` | Public; current on-chain status |
-| `GET /api/certificates/:hash/download` | ADMIN / ISSUER |
-| `GET /api/certificates/audit/:hash` | Public |
-| `POST /api/certificates/revoke` | ADMIN; JSON `certificateHash` |
-| `POST /api/issuers/register` and `/remove` | ADMIN; JSON `issuerAddress` |
-| `GET /api/issuers/:address` | ADMIN |
-| `GET /api/health` | 200 if database/contract respond, otherwise 503 |
+1. Start the backend and sign in with your existing account.
+2. Issue a PDF using a simple ID such as DEMO-001.
+3. Verify the original, then an edited copy; compare academic details separately.
+4. Correct the certificate with a new ID/PDF and follow its previous/replacement links.
+5. Revoke the active version and inspect the current session's event history.
+6. Stop the backend, start it again, and refresh the page.
+7. Sign in with the same account. The certificate list is empty and DEMO-001 can be issued again.
 
-Authenticated calls use `Authorization: Bearer <token>`. Tokens expire after eight hours; the UI uses session storage. All verification results come from the configured contract.
+The browser checks session health every five seconds. If the backend becomes unreachable, it clears displayed certificate results; if the session ID changes, it resets the old forms/results. Network reachability alone cannot prove a process has exited; the actual non-persistence is guaranteed by keeping the certificates and chain inside that process.
 
-## Structure
+## Main files
 
-- `contracts/`: Solidity contract.
-- `test/`: contract tests.
-- `scripts/`: local startup, deployment, ABI synchronization.
-- `backend/src/`: API, authentication, blockchain/database services.
-- `backend/public/`: HTML/CSS/JavaScript interface.
-- `backend/sql/schema.sql`: PostgreSQL table definitions.
-- `backend/test/`: integration tests.
-- `backend/uploads/`: private certificate PDFs, ignored by Git.
+- contracts/CertificateVerification.sol: on-chain issuance, academic hashes, correction links and revocation rules.
+- backend/src/services/blockchainService.ts: creates/deploys the fresh in-process demo chain.
+- backend/src/services/certificateStore.ts: temporary certificate metadata and PDF buffers.
+- backend/src/services/authService.ts and config/database.ts: persistent PostgreSQL accounts and login.
+- backend/src/cleanupCertificateHistory.ts: removes legacy certificate-only SQL/disk storage.
+- backend/src/server.ts: HTTP server startup and graceful resource cleanup.
+- backend/public/: plain interface and client-side hashing/session monitoring.
+- backend/test/demo-session.test.ts: forced-stop/restart regression test.
 
-This is a local academic baseline, not a hosted production service.
+Older standalone deployment examples are not used by the demo startup. Earlier explanation notes describe prior storage behaviour; the current implementation uses temporary certificate storage as described here and in docs/DEMO_MODE.md.

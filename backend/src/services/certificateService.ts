@@ -1,25 +1,31 @@
 import { calculateSHA256 } from "./hashService.js";
-import { certificateContract, issuerWallet } from "./blockchainService.js";
+import { certificateContract, ownerContract, issuerWallet, ownerWallet } from "./blockchainService.js";
 
-export async function issueCertificate(certificateId: string, fileData: Buffer) {
+export async function issueCertificate(certificateId: string, fileData: Buffer, academicHash: string, previousHash?: string) {
   const certificateHash = `0x${calculateSHA256(fileData)}`;
-  const issuerAddress = await issuerWallet.getAddress();
-  const existing = await certificateContract.certificates(certificateHash);
-  // Recover a confirmed transaction whose database write failed, without issuing twice.
+  const contract = previousHash ? ownerContract : certificateContract;
+  const issuerAddress = await (previousHash ? ownerWallet : issuerWallet).getAddress();
+  const existing = await contract.certificates(certificateHash);
+  // If a request was interrupted after confirmation, reuse its current-session transaction.
   if (existing.issuedAt > 0n) {
-    if (existing.certificateId !== certificateId.trim() || existing.issuer.toLowerCase() !== issuerAddress.toLowerCase() || existing.revoked) {
-      throw new Error("Certificate hash is already registered with different details or is revoked");
+    const expectedPrevious = previousHash || `0x${"0".repeat(64)}`;
+    if (existing.certificateId !== certificateId || existing.issuer.toLowerCase() !== issuerAddress.toLowerCase() ||
+        existing.academicHash !== academicHash || existing.previousHash !== expectedPrevious || existing.revoked ||
+        existing.replacementHash !== `0x${"0".repeat(64)}`) {
+      throw new Error("This file is already registered with different details, or is no longer active");
     }
-    const events = await certificateContract.queryFilter(certificateContract.filters.CertificateIssued(certificateHash));
+    const events = await contract.queryFilter(contract.filters.CertificateIssued(certificateHash));
     const event = events[0];
-    if (!event) throw new Error("Unable to recover issuance transaction");
-    return { certificateId: existing.certificateId as string, certificateHash, issuerAddress, transactionHash: event.transactionHash,
+    if (!event) throw new Error("Unable to recover the issuance transaction");
+    return { certificateId, certificateHash, issuerAddress, transactionHash: event.transactionHash,
       blockNumber: event.blockNumber, issuedAt: existing.issuedAt.toString() as string };
   }
-  const transaction = await certificateContract.issueCertificate(certificateHash, certificateId.trim());
+  const transaction = previousHash
+    ? await contract.replaceCertificate(previousHash, certificateHash, certificateId, academicHash)
+    : await contract.issueCertificateWithDetails(certificateHash, certificateId, academicHash);
   const receipt = await transaction.wait();
   if (!receipt || receipt.status !== 1) throw new Error("Transaction was not confirmed");
   const block = await receipt.getBlock();
-  return { certificateId: certificateId.trim(), certificateHash, issuerAddress, transactionHash: receipt.hash as string,
+  return { certificateId, certificateHash, issuerAddress, transactionHash: receipt.hash as string,
     blockNumber: receipt.blockNumber as number, issuedAt: String(block.timestamp) };
 }
