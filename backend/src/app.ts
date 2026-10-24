@@ -1,4 +1,5 @@
 import express from "express";
+import { randomUUID } from "node:crypto";
 import type { ErrorRequestHandler } from "express";
 import multer from "multer";
 import { fileURLToPath } from "node:url";
@@ -11,8 +12,10 @@ import auditRoutes from "./routes/auditRoutes.js";
 import { testDatabaseConnection } from "./config/database.js";
 import authRoutes from "./routes/authRoutes.js";
 import issuerRoutes from "./routes/issuerRoutes.js";
+import { listCertificates } from "./services/certificateStore.js";
 
 export const app = express();
+const demoSessionId = randomUUID();
 app.disable("x-powered-by");
 app.use((_req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -31,7 +34,10 @@ app.use("/api/issuers", issuerRoutes);
 app.get("/api/health", async (_req, res) => {
   const [database, blockchain] = await Promise.allSettled([testDatabaseConnection(), getBlockchainInfo()]);
   const healthy = database.status === "fulfilled" && blockchain.status === "fulfilled";
-  res.status(healthy ? 200 : 503).json({ status: healthy ? "OK" : "DEGRADED", database: database.status === "fulfilled" ? "connected" : "unavailable",
+  res.status(healthy ? 200 : 503).json({ status: healthy ? "OK" : "DEGRADED", applicationVersion: 3,
+    demoSessionId, certificateStorage: "memory", certificateCount: listCertificates().length,
+    contractAddress: blockchain.status === "fulfilled" ? blockchain.value.contractAddress : null,
+    database: database.status === "fulfilled" ? "connected" : "unavailable",
     blockchain: blockchain.status === "fulfilled" ? "connected" : "unavailable" });
 });
 app.get("/api/blockchain", async (_req, res, next) => {

@@ -1,8 +1,28 @@
-const $ = (selector) => document.querySelector(selector);
-let token = sessionStorage.getItem('certify-token');
+// This page uses ordinary forms, fetch requests and DOM updates; no UI framework.
+const $ = selector => document.querySelector(selector);
+const academicFields = ['studentName', 'rollNumber', 'degree', 'department', 'graduationYear', 'grade'];
+let token = sessionStorage.getItem('acv-token');
 let user = null;
-const date = (value) => value ? new Date(typeof value === 'string' && /^\d+$/.test(value) ? Number(value) * 1000 : value).toLocaleString() : '—';
-function element(tag, text, className) { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; }
+let demoSessionId = null;
+let serverOnline = false;
+
+function element(tag, text) {
+  const node = document.createElement(tag);
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+function date(value) {
+  if (!value || value === '0') return '-';
+  return new Date(/^\d+$/.test(String(value)) ? Number(value) * 1000 : value).toLocaleString();
+}
+function message(target, text, error = false) {
+  target.hidden = false;
+  target.textContent = text;
+  target.classList.toggle('error', error);
+  if (target.classList.contains('result')) target.className = `result ${error ? 'bad' : ''}`;
+}
+function notice(text) { message($('#notice'), text); }
+
 async function api(path, options = {}) {
   const headers = new Headers(options.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
@@ -11,15 +31,22 @@ async function api(path, options = {}) {
   const data = await response.json();
   if (!response.ok) {
     if (response.status === 401 && user) logout();
-    throw new Error(data.message || 'Service unavailable. Check that the database and blockchain are running.');
+    throw new Error(data.message || 'Request failed. Check the database and blockchain.');
   }
   return data;
 }
-function message(target, text, error = false) { target.textContent = text; if (target.classList.contains('result')) target.className = `result ${error ? 'bad' : ''}`; target.classList.toggle('error', error); }
-function notify(text) { $('#notice').textContent = text; $('#notice').hidden = false; setTimeout(() => { $('#notice').hidden = true; }, 5000); }
+function post(path, body) { return api(path, { method: 'POST', body: body instanceof FormData ? body : JSON.stringify(body) }); }
+async function submit(form, target, action) {
+  const buttons = [...form.querySelectorAll('button')];
+  buttons.forEach(button => { button.disabled = true; });
+  message(target, 'Please wait...');
+  try { await action(); }
+  catch (error) { message(target, error.message, true); }
+  finally { buttons.forEach(button => { button.disabled = false; }); }
+}
 function showPanel(id) {
   document.querySelectorAll('.panel').forEach(panel => { panel.hidden = panel.id !== id; });
-  document.querySelectorAll('.tab').forEach(tab => tab.classList.toggle('active', tab.dataset.panel === id));
+  document.querySelectorAll('.tab').forEach(tab => { tab.classList.toggle('active', tab.dataset.panel === id); });
   if (id === 'records') void loadRecords();
 }
 document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => showPanel(tab.dataset.panel)));
@@ -27,118 +54,234 @@ function updateSession() {
   const staff = user && ['ADMIN', 'ISSUER'].includes(user.role);
   document.querySelectorAll('.staff').forEach(node => { node.hidden = !staff; });
   document.querySelectorAll('.admin').forEach(node => { node.hidden = user?.role !== 'ADMIN'; });
-  $('#login-open').hidden = Boolean(user); $('#logout').hidden = !user; $('#account').hidden = !user;
-  $('#account').textContent = user ? `${user.name} · ${user.role.toLowerCase()}` : '';
+  $('#login-open').hidden = Boolean(user);
+  $('#logout').hidden = !user;
+  $('#account').hidden = !user;
+  $('#account').textContent = user ? `${user.name} (${user.role})` : '';
 }
-function logout() { token = null; user = null; sessionStorage.removeItem('certify-token'); updateSession(); showPanel('verify'); $('#records-body').replaceChildren(); }
-$('#logout').addEventListener('click', logout);
+function logout() {
+  token = null; user = null;
+  sessionStorage.removeItem('acv-token');
+  $('#issue-form').reset();
+  $('#records-body').replaceChildren();
+  updateSession(); showPanel('verify');
+}
 $('#login-open').addEventListener('click', () => $('#login-dialog').showModal());
 $('#login-close').addEventListener('click', () => $('#login-dialog').close());
-async function submit(form, task, target) {
-  const buttons = [...form.querySelectorAll('button')]; buttons.forEach(button => { button.disabled = true; });
-  if (target) message(target, 'Working…');
-  try { await task(); } catch (error) { if (target) message(target, error.message, true); else notify(error.message); }
-  finally { buttons.forEach(button => { button.disabled = false; }); }
-}
+$('#logout').addEventListener('click', logout);
 $('#login-form').addEventListener('submit', event => {
-  event.preventDefault(); const form = event.currentTarget;
-  void submit(form, async () => {
-    const result = await api('/auth/login', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) });
-    token = result.token; user = result.user; sessionStorage.setItem('certify-token', token); updateSession();
-    $('#login-dialog').close(); form.reset(); message(form.querySelector('.form-message'), '');
+  event.preventDefault();
+  const form = event.currentTarget;
+  void submit(form, form.querySelector('.form-message'), async () => {
+    const result = await post('/auth/login', Object.fromEntries(new FormData(form)));
+    token = result.token; user = result.user;
+    sessionStorage.setItem('acv-token', token);
+    updateSession(); form.reset(); $('#login-dialog').close();
+    message(form.querySelector('.form-message'), '');
     showPanel(['ADMIN', 'ISSUER'].includes(user.role) ? 'records' : 'verify');
     await fillIssuer();
-  }, form.querySelector('.form-message'));
+  });
 });
-function details(target, title, fields, state = '') {
-  target.hidden = false; target.replaceChildren(); target.className = `result ${state}`;
-  target.append(element('h3', title, 'status'));
-  const dl = element('dl');
-  for (const [label, value] of fields) {
-    const pair = element('div'); pair.append(element('dt', label), element('dd', String(value ?? '—'), /hash|address|issuer/i.test(label) ? 'hash' : '')); dl.append(pair);
+
+function showResult(target, title, rows, good) {
+  target.hidden = false;
+  target.className = `result ${good ? 'good' : 'bad'}`;
+  target.replaceChildren(element('h3', title));
+  const list = element('dl');
+  for (const [key, value] of rows) {
+    list.append(element('dt', key), element('dd', String(value ?? '-')));
   }
-  target.append(dl);
+  target.append(list);
 }
-function checkFile(form) {
+function recordRows(c) {
+  return [['Certificate ID', c.certificateId || 'Not registered'], ['Status', c.verificationStatus],
+    ['Document hash', c.certificateHash], ...(c.certificateId ? [['Issuer', c.issuer], ['Issued', date(c.issuedAt)]] : []),
+    ...(c.revoked ? [['Revoked', date(c.revokedAt)]] : [])];
+}
+function openRecord(hash) {
+  showPanel('lookup'); $('#lookup-form input').value = hash; void lookup(hash);
+}
+function correctionLinks(target, c) {
+  for (const [label, hash] of [['View previous certificate', c.previousHash], ['View corrected certificate', c.replacementHash]]) {
+    if (!hash) continue;
+    const button = element('button', label);
+    button.type = 'button'; button.addEventListener('click', () => openRecord(hash)); target.append(button);
+  }
+}
+function selectedFile(form) {
   const file = new FormData(form).get('certificate');
-  if (!file?.size) throw new Error('Choose a nonempty certificate file.');
-  if (file.size > 10 * 1024 * 1024) throw new Error('File must be 10 MB or smaller.');
+  if (!file?.size) throw new Error('Select a nonempty certificate file.');
+  if (file.size > 10 * 1024 * 1024) throw new Error('The file must be 10 MB or smaller.');
+  return file;
 }
+
+// Verification sends a hash only. Issuance still uploads the PDF for storage.
 $('#verify-form').addEventListener('submit', event => {
   event.preventDefault(); const form = event.currentTarget; const target = $('#verify-result');
-  void submit(form, async () => {
-    checkFile(form); const { certificate: c } = await api('/certificates/verify', { method: 'POST', body: new FormData(form) });
-    details(target, c.verificationStatus === 'VALID' ? '✓ Valid certificate' : c.revoked ? 'Revoked certificate' : 'No matching certificate', [
-      ['Result', c.valid ? 'The exact file matches an active blockchain record.' : c.revoked ? 'The issuer or administrator has revoked this certificate.' : 'This file is unregistered or has changed since issuance.'],
-      ['Certificate ID', c.certificateId || 'Not registered'], ['Document hash', c.certificateHash],
-      ...(c.certificateId ? [['Issuer address', c.issuer], ['Issued', date(c.issuedAt)]] : [])
-    ], c.valid ? 'good' : 'bad');
-  }, target);
+  void submit(form, target, async () => {
+    const file = selectedFile(form);
+    if (!globalThis.crypto?.subtle) throw new Error('Open this application on localhost or HTTPS to use browser hashing.');
+    const bytes = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+    const certificateHash = '0x' + [...new Uint8Array(bytes)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    const { certificate: c } = await post('/certificates/verify/hash', { certificateHash });
+    const titles = { VALID: 'Exact file matches an active certificate', INVALID: 'No registered record matches this file', REVOKED: 'This certificate has been revoked', SUPERSEDED: 'This certificate has a corrected replacement' };
+    showResult(target, titles[c.verificationStatus], recordRows(c), c.valid);
+    correctionLinks(target, c);
+  });
+});
+$('#details-form').addEventListener('submit', event => {
+  event.preventDefault(); const form = event.currentTarget; const target = $('#details-result');
+  void submit(form, target, async () => {
+    const { certificate: c } = await post('/certificates/verify/details', Object.fromEntries(new FormData(form)));
+    const title = c.detailsMatch ? 'Entered academic details match the registered record' : 'Academic details could not be verified';
+    showResult(target, title, [['Certificate ID', c.certificateId], ['Details match', c.detailsMatch ? 'Yes' : 'No'],
+      ['Record status', c.verificationStatus], ['Explanation', c.message]], c.detailsMatch && c.valid);
+    correctionLinks(target, c);
+  });
 });
 async function lookup(hash) {
-  const target = $('#lookup-result'); target.hidden = false; message(target, 'Checking blockchain record…');
+  const target = $('#lookup-result'); message(target, 'Loading record...');
   try {
     const { certificate: c } = await api(`/certificates/${encodeURIComponent(hash)}`);
-    details(target, c.revoked ? 'Revoked certificate' : 'Registered certificate', [ ['Certificate ID', c.certificateId], ['Document hash', c.certificateHash], ['Issuer address', c.issuer], ['Issued', date(c.issuedAt)], ...(c.revoked ? [['Revoked', date(c.revokedAt)]] : []) ], c.revoked ? 'bad' : 'good');
+    showResult(target, 'Blockchain certificate record', recordRows(c), c.valid);
+    correctionLinks(target, c);
     try {
       const { history } = await api(`/certificates/audit/${encodeURIComponent(hash)}`);
-      target.append(element('h3', 'On-chain history')); const list = element('ol', undefined, 'history');
-      for (const entry of history) { const item = element('li', `${entry.type} · Block ${entry.blockNumber}`); item.append(element('br'), element('code', entry.transactionHash)); list.append(item); }
+      target.append(element('h3', 'Transaction history'));
+      const list = element('ol');
+      for (const entry of history) {
+        const row = element('li', `${entry.type} - block ${entry.blockNumber}`);
+        row.append(element('br'), element('code', entry.transactionHash)); list.append(row);
+      }
       target.append(list);
-    } catch { target.append(element('p', 'Record found. Audit history is temporarily unavailable.')); }
+    } catch { target.append(element('p', 'Audit history is temporarily unavailable.')); }
   } catch (error) { message(target, error.message, true); }
 }
-$('#lookup-form').addEventListener('submit', event => { event.preventDefault(); const form = event.currentTarget; void submit(form, () => lookup(new FormData(form).get('hash').trim())); });
+$('#lookup-form').addEventListener('submit', event => {
+  event.preventDefault(); const form = event.currentTarget;
+  void submit(form, $('#lookup-result'), () => lookup(new FormData(form).get('hash').trim()));
+});
 $('#issue-form').addEventListener('submit', event => {
   event.preventDefault(); const form = event.currentTarget;
-  void submit(form, async () => {
-    checkFile(form); const { certificate: c } = await api('/certificates/issue', { method: 'POST', body: new FormData(form) });
-    details($('#issue-result'), '✓ Certificate issued', [['Certificate ID', c.certificateId], ['Document hash', c.certificateHash], ['Transaction hash', c.transactionHash], ['Block', c.blockNumber]], 'good'); form.reset();
-  }, $('#issue-result'));
+  const body = new FormData(form);
+  const previous = body.get('previousHash')?.trim();
+  if (!previous) body.delete('previousHash');
+  else body.set('previousHash', previous);
+  if (previous && !confirm('Issue this correction and permanently mark the old certificate as superseded?')) return;
+  void submit(form, $('#issue-result'), async () => {
+    selectedFile(form);
+    const { certificate: c, message: text } = await post(previous ? '/certificates/replace' : '/certificates/issue', body);
+    showResult($('#issue-result'), text, [['Certificate ID', c.certificateId], ['Document hash', c.certificateHash],
+      ['Academic-details hash', c.academicHash], ['Transaction hash', c.transactionHash]], true);
+    form.reset();
+  });
 });
+
 async function download(hash, filename) {
   try {
     const response = await fetch(`/api/certificates/${hash}/download`, { headers: { Authorization: `Bearer ${token}` } });
-    if (!response.ok) throw new Error((await response.json()).message || 'Unable to download');
-    const url = URL.createObjectURL(await response.blob()); const a = element('a'); a.href = url; a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-  } catch (error) { notify(error.message); }
+    if (!response.ok) throw new Error((await response.json()).message || 'Download failed');
+    const url = URL.createObjectURL(await response.blob());
+    const link = element('a'); link.href = url; link.download = filename; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) { notice(error.message); }
 }
 async function loadRecords() {
-  message($('#records-message'), 'Loading records…'); $('#records-body').replaceChildren();
+  const target = $('#records-message'); message(target, 'Loading...'); $('#records-body').replaceChildren();
   try {
     const { certificates } = await api('/certificates');
     for (const c of certificates) {
-      const tr = element('tr'); tr.append(element('td', c.certificate_id), element('td', date(c.issued_at)));
-      const status = element('td'); status.append(element('span', c.revoked ? 'Revoked' : 'Issued', `badge ${c.revoked ? 'revoked' : ''}`)); tr.append(status);
-      const actions = element('td'); const view = element('button', 'View', 'button secondary'); view.addEventListener('click', () => { showPanel('lookup'); $('#lookup-form input').value = c.certificate_hash; void lookup(c.certificate_hash); });
-      const save = element('button', 'PDF ↓', 'button secondary'); save.addEventListener('click', () => void download(c.certificate_hash, c.file_name)); actions.append(view, save); tr.append(actions); $('#records-body').append(tr);
+      const row = element('tr');
+      row.append(element('td', c.certificate_id), element('td', c.academic_details?.studentName || '-'), element('td', date(c.issued_at)),
+        element('td', c.replacement_hash ? 'Superseded' : c.revoked ? 'Revoked' : 'Issued'));
+      const actions = element('td');
+      const view = element('button', 'View'); view.addEventListener('click', () => openRecord(c.certificate_hash));
+      const save = element('button', 'Download'); save.addEventListener('click', () => void download(c.certificate_hash, c.file_name));
+      actions.append(view, save);
+      if (user?.role === 'ADMIN' && !c.revoked && !c.replacement_hash) {
+        const correct = element('button', 'Correct');
+        correct.addEventListener('click', () => {
+          const form = $('#issue-form'); form.reset();
+          for (const field of academicFields) form.elements.namedItem(field).value = c.academic_details?.[field] || '';
+          form.elements.namedItem('certificateId').value = c.certificate_id + '-R1';
+          form.elements.namedItem('previousHash').value = c.certificate_hash;
+          showPanel('issue');
+        });
+        actions.append(correct);
+      }
+      row.append(actions); $('#records-body').append(row);
     }
-    message($('#records-message'), certificates.length ? '' : 'No certificates yet. Issue your first certificate to see it here.');
-  } catch (error) { message($('#records-message'), error.message, true); }
+    message(target, certificates.length ? '' : 'No certificates in this demo session. You can issue a new one or reuse an ID from a previous run.');
+  } catch (error) { message(target, error.message, true); }
 }
 $('#refresh-records').addEventListener('click', () => void loadRecords());
 $('#user-form').addEventListener('submit', event => {
   event.preventDefault(); const form = event.currentTarget; const target = form.querySelector('.form-message');
-  void submit(form, async () => { const result = await api('/auth/users', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) }); message(target, `Account created for ${result.user.email}.`); form.reset(); }, target);
+  void submit(form, target, async () => {
+    const { user: created } = await post('/auth/users', Object.fromEntries(new FormData(form)));
+    message(target, `Account created: ${created.email}`); form.reset();
+  });
 });
 $('#issuer-form').addEventListener('submit', event => {
-  event.preventDefault(); const form = event.currentTarget; const action = event.submitter.value; const address = new FormData(form).get('issuerAddress').trim();
-  if (action === 'remove' && !confirm('Remove this wallet’s permission to issue new certificates? Existing certificates stay valid.')) return;
-  void submit(form, async () => {
-    const result = await api(action === 'status' ? `/issuers/${address}` : `/issuers/${action}`, action === 'status' ? {} : { method: 'POST', body: JSON.stringify({ issuerAddress: address }) });
-    message(form.querySelector('.form-message'), result.issuer.registered ? 'This wallet is authorized to issue certificates.' : 'This wallet is not authorized to issue certificates.');
-  }, form.querySelector('.form-message'));
+  event.preventDefault(); const form = event.currentTarget; const action = event.submitter?.value || 'status';
+  const issuerAddress = new FormData(form).get('issuerAddress').trim();
+  if (action === 'remove' && !confirm('Remove this wallet’s permission to issue new certificates?')) return;
+  void submit(form, form.querySelector('.form-message'), async () => {
+    const result = action === 'status' ? await api(`/issuers/${issuerAddress}`) : await post(`/issuers/${action}`, { issuerAddress });
+    message(form.querySelector('.form-message'), result.issuer.registered ? 'Issuer is authorized.' : 'Issuer is not authorized.');
+  });
 });
 $('#revoke-form').addEventListener('submit', event => {
   event.preventDefault(); const form = event.currentTarget;
-  if (!confirm('Permanently revoke this certificate? This cannot be undone.')) return;
-  void submit(form, async () => { await api('/certificates/revoke', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) }); message(form.querySelector('.form-message'), 'Certificate revoked. The blockchain history remains available.'); }, form.querySelector('.form-message'));
+  if (!confirm('Permanently revoke this certificate?')) return;
+  void submit(form, form.querySelector('.form-message'), async () => {
+    await post('/certificates/revoke', Object.fromEntries(new FormData(form)));
+    message(form.querySelector('.form-message'), 'Certificate revoked.');
+  });
 });
-async function fillIssuer() { if (user?.role !== 'ADMIN') return; try { const { blockchain } = await api('/blockchain'); $('#issuer-form input').value = blockchain.issuer; } catch {} }
+async function fillIssuer() {
+  if (user?.role !== 'ADMIN') return;
+  try { $('#issuer-form input').value = (await api('/blockchain')).blockchain.issuer; } catch {}
+}
+function clearCertificateDisplay() {
+  for (const id of ['verify-result', 'details-result', 'lookup-result', 'issue-result']) {
+    const target = document.getElementById(id); target.replaceChildren(); target.hidden = true;
+  }
+  for (const id of ['verify-form', 'details-form', 'lookup-form', 'issue-form', 'revoke-form']) document.getElementById(id).reset();
+  $('#records-body').replaceChildren();
+  message($('#records-message'), 'No certificates loaded for this demo session.');
+}
+async function checkDemoSession() {
+  try {
+    const response = await fetch('/api/health', { signal: AbortSignal.timeout(10000) });
+    const status = await response.json();
+    if (status.applicationVersion !== 3) {
+      $('#connection').textContent = 'Restart required: the older backend is still running.';
+      notice('Stop the old server with Ctrl+C in its VS Code terminal, then run npm run dev:local. Refresh this page after startup finishes.');
+      $('#login-open').disabled = true;
+      document.querySelectorAll('form button:not([type="button"])').forEach(button => { button.disabled = true; });
+      return;
+    }
+    if (demoSessionId && demoSessionId !== status.demoSessionId) {
+      clearCertificateDisplay();
+      notice('A fresh demo session has started. Previous certificates have been cleared; your user account is unchanged.');
+    }
+    demoSessionId = status.demoSessionId;
+    serverOnline = true;
+    $('#connection').textContent = response.ok ? 'Database and blockchain connected' : `Services unavailable: database ${status.database}, blockchain ${status.blockchain}`;
+  } catch {
+    if (serverOnline) clearCertificateDisplay();
+    serverOnline = false;
+    $('#connection').textContent = 'Server stopped or unreachable. Certificate data is temporary.';
+  }
+}
 async function init() {
   updateSession();
-  try { const response = await fetch('/api/health', { signal: AbortSignal.timeout(10000) }); const health = await response.json(); $('#connection').textContent = response.ok ? 'Services connected' : `Check ${health.database === 'unavailable' ? 'database' : 'blockchain'}`; $('#connection').classList.toggle('connected', response.ok); }
-  catch { $('#connection').textContent = 'Services unavailable'; }
-  if (token) { try { user = (await api('/auth/me')).user; updateSession(); await fillIssuer(); } catch { logout(); } }
+  await checkDemoSession();
+  if (token) {
+    try { user = (await api('/auth/me')).user; updateSession(); await fillIssuer(); }
+    catch { logout(); }
+  }
 }
 void init();
+setInterval(() => { void checkDemoSession(); }, 5000);

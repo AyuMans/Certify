@@ -25,6 +25,8 @@ router.get("/:hash", async (req, res) => {
 
     const revokedEvents =
       await certificateContract.queryFilter(revokedFilter);
+    const supersededEvents = await certificateContract.queryFilter(certificateContract.filters.CertificateReplaced(hash));
+    const replacementEvents = await certificateContract.queryFilter(certificateContract.filters.CertificateReplaced(null, hash));
 
     const history = [
       ...issuedEvents.map((event) => ({
@@ -37,6 +39,12 @@ router.get("/:hash", async (req, res) => {
         type: "REVOKED",
         blockNumber: event.blockNumber,
         transactionHash: event.transactionHash,
+      })),
+      ...supersededEvents.map((event) => ({
+        type: "SUPERSEDED", blockNumber: event.blockNumber, transactionHash: event.transactionHash,
+      })),
+      ...replacementEvents.map((event) => ({
+        type: "REPLACEMENT", blockNumber: event.blockNumber, transactionHash: event.transactionHash,
       })),
     ].sort((a, b) => a.blockNumber - b.blockNumber);
 

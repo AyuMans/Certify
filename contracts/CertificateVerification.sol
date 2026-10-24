@@ -14,6 +14,9 @@ contract CertificateVerification {
         uint256 issuedAt;
         bool revoked;
         uint256 revokedAt;
+        bytes32 academicHash;
+        bytes32 previousHash;
+        bytes32 replacementHash;
     }
 
     // Certificate hash => certificate information
@@ -21,9 +24,15 @@ contract CertificateVerification {
 
     // Prevent the same certificate ID from being registered twice
     mapping(bytes32 => bool) private certificateIds;
+    mapping(bytes32 => bytes32) private hashesById;
 
     event IssuerAdded(address indexed issuer);
     event IssuerRemoved(address indexed issuer);
+    event CertificateReplaced(bytes32 indexed previousHash, bytes32 indexed replacementHash);
+
+    function contractVersion() public pure returns (uint256) {
+        return 2;
+    }
 
     event CertificateIssued(
         bytes32 indexed certificateHash,
@@ -102,6 +111,44 @@ contract CertificateVerification {
         bytes32 certificateHash,
         string memory certificateId
     ) public onlyIssuer {
+        _issueCertificate(certificateHash, certificateId, bytes32(0), bytes32(0));
+    }
+
+    function issueCertificateWithDetails(
+        bytes32 certificateHash,
+        string memory certificateId,
+        bytes32 academicHash
+    ) public onlyIssuer {
+        require(academicHash != bytes32(0), "Academic hash is required");
+        _issueCertificate(certificateHash, certificateId, academicHash, bytes32(0));
+    }
+
+    // Creating a replacement and superseding the old record happen in one transaction.
+    function replaceCertificate(
+        bytes32 previousHash,
+        bytes32 newHash,
+        string memory newId,
+        bytes32 academicHash
+    ) public {
+        Certificate storage previous = certificates[previousHash];
+        require(previous.issuedAt != 0, "Certificate does not exist");
+        require(!previous.revoked, "Certificate is revoked");
+        require(previous.replacementHash == bytes32(0), "Certificate already superseded");
+        require(msg.sender == owner ||
+            (msg.sender == previous.issuer && authorizedIssuers[msg.sender]),
+            "Not authorized to replace");
+        require(academicHash != bytes32(0), "Academic hash is required");
+        _issueCertificate(newHash, newId, academicHash, previousHash);
+        previous.replacementHash = newHash;
+        emit CertificateReplaced(previousHash, newHash);
+    }
+
+    function _issueCertificate(
+        bytes32 certificateHash,
+        string memory certificateId,
+        bytes32 academicHash,
+        bytes32 previousHash
+    ) internal {
 
         require(
             certificateHash != bytes32(0),
@@ -135,10 +182,14 @@ contract CertificateVerification {
             issuer: msg.sender,
             issuedAt: block.timestamp,
             revoked: false,
-            revokedAt: 0
+            revokedAt: 0,
+            academicHash: academicHash,
+            previousHash: previousHash,
+            replacementHash: bytes32(0)
         });
 
         certificateIds[certificateIdHash] = true;
+        hashesById[certificateIdHash] = certificateHash;
 
         emit CertificateIssued(
             certificateHash,
@@ -182,7 +233,7 @@ contract CertificateVerification {
         // valid is TRUE only if the certificate exists
         // and has not been revoked.
         return (
-            !certificate.revoked,
+            !certificate.revoked && certificate.replacementHash == bytes32(0),
             certificate.revoked,
             certificate.certificateId,
             certificate.issuer,
@@ -193,6 +244,15 @@ contract CertificateVerification {
     // --------------------------------------------------
     // GET CERTIFICATE
     // --------------------------------------------------
+
+    function getCertificateHashById(string memory certificateId) public view returns (bytes32) {
+        return hashesById[keccak256(bytes(certificateId))];
+    }
+
+    function getAcademicRecord(bytes32 certificateHash) public view returns (bytes32, bytes32, bytes32) {
+        Certificate memory certificate = certificates[certificateHash];
+        return (certificate.academicHash, certificate.previousHash, certificate.replacementHash);
+    }
 
     function getCertificate(
         bytes32 certificateHash
@@ -246,6 +306,7 @@ contract CertificateVerification {
             !certificate.revoked,
             "Certificate already revoked"
         );
+        require(certificate.replacementHash == bytes32(0), "Certificate already superseded");
 
         // The original issuer or the contract owner
         // can revoke the certificate.

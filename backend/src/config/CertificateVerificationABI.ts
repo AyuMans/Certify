@@ -42,6 +42,25 @@ export const CertificateVerificationABI = [
       {
         "indexed": true,
         "internalType": "bytes32",
+        "name": "previousHash",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "replacementHash",
+        "type": "bytes32"
+      }
+    ],
+    "name": "CertificateReplaced",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
         "name": "certificateHash",
         "type": "bytes32"
       },
@@ -151,6 +170,63 @@ export const CertificateVerificationABI = [
         "internalType": "uint256",
         "name": "revokedAt",
         "type": "uint256"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "academicHash",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "previousHash",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "replacementHash",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "contractVersion",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "certificateHash",
+        "type": "bytes32"
+      }
+    ],
+    "name": "getAcademicRecord",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
       }
     ],
     "stateMutability": "view",
@@ -203,6 +279,25 @@ export const CertificateVerificationABI = [
   {
     "inputs": [
       {
+        "internalType": "string",
+        "name": "certificateId",
+        "type": "string"
+      }
+    ],
+    "name": "getCertificateHashById",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "bytes32",
         "name": "certificateHash",
         "type": "bytes32"
@@ -214,6 +309,29 @@ export const CertificateVerificationABI = [
       }
     ],
     "name": "issueCertificate",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "certificateHash",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "string",
+        "name": "certificateId",
+        "type": "string"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "academicHash",
+        "type": "bytes32"
+      }
+    ],
+    "name": "issueCertificateWithDetails",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -253,6 +371,34 @@ export const CertificateVerificationABI = [
       }
     ],
     "name": "removeIssuer",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "previousHash",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "newHash",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "string",
+        "name": "newId",
+        "type": "string"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "academicHash",
+        "type": "bytes32"
+      }
+    ],
+    "name": "replaceCertificate",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

@@ -9,7 +9,8 @@
     "start": "node dist/server.js",
     "create-admin": "tsx src/createAdmin.ts",
     "db:setup": "tsx src/setupDatabase.ts",
-    "test": "tsx --test test/*.test.ts"
+    "test": "tsx --test test/*.test.ts",
+    "reset:certificates": "tsx src/resetDemo.ts"
   },
   "keywords": [],
   "author": "",

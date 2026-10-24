@@ -1,24 +1,18 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import { readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import dotenv from "dotenv";
 import pg from "pg";
-import { ContractFactory, HDNodeWallet, JsonRpcProvider, NonceManager } from "ethers";
 import type { Server } from "node:http";
-import { spawn, type ChildProcess } from "node:child_process";
-import { fileURLToPath } from "node:url";
 
 dotenv.config({ quiet: true });
 const schema = `acv_test_${randomBytes(6).toString('hex')}`;
 const adminPool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
-const rpc = process.env.TEST_RPC_URL || 'http://127.0.0.1:18546';
-const provider = new JsonRpcProvider(rpc);
-let chainProcess: ChildProcess | undefined;
-let server: Server, base: string, database: pg.Pool, backendProvider: JsonRpcProvider, uploads: string;
+let server: Server, base: string, database: pg.Pool;
+let closeBlockchain: (() => Promise<void>) | undefined;
 let adminToken: string, issuerToken: string, verifierToken: string, certificateHash: string;
+const academic = { studentName: 'Ayush Kumar', rollNumber: 'CS-101', degree: 'B.Tech', department: 'Computer Science', graduationYear: '2026', grade: '8.5' };
 const pdf = Buffer.from('%PDF-1.4\n% Integration test certificate ' + randomBytes(12).toString('hex') + '\n%%EOF');
 async function request(route: string, method = 'GET', body?: unknown, token?: string) {
   const headers: Record<string,string> = token ? { Authorization: `Bearer ${token}` } : {};
@@ -26,37 +20,25 @@ async function request(route: string, method = 'GET', body?: unknown, token?: st
   const response = await fetch(base + route, { method, headers, body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined });
   return { status: response.status, data: await response.json() };
 }
-function file(data = pdf, id?: string) { const body = new FormData(); body.set('certificate', new Blob([data], { type: 'application/pdf' }), 'certificate.pdf'); if (id) body.set('certificateId', id); return body; }
+function file(data = pdf, id?: string, details = academic) {
+  const body = new FormData();
+  body.set('certificate', new Blob([data], { type: 'application/pdf' }), 'certificate.pdf');
+  if (id) { body.set('certificateId', id); for (const [key,value] of Object.entries(details)) body.set(key,value); }
+  return body;
+}
 
 before(async () => {
-  if (!process.env.TEST_RPC_URL) {
-    chainProcess = spawn(process.execPath, ['node_modules/hardhat/dist/src/cli.js', 'node', '--hostname', '127.0.0.1', '--port', '18546'], {
-      cwd: fileURLToPath(new URL('../../', import.meta.url)), windowsHide: true, stdio: 'ignore'
-    });
-    let ready = false;
-    for (let i = 0; i < 100; i++) {
-      try { const r = await fetch(rpc, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_chainId',params:[]}), signal: AbortSignal.timeout(1000) }); if (r.ok) { ready = true; break; } } catch {}
-      await new Promise(resolve => setTimeout(resolve, 200));
-    }
-    assert.ok(ready, 'Local test blockchain could not start');
-  }
-  assert.equal((await provider.getNetwork()).chainId, 31337n, 'Tests require a local Hardhat blockchain');
   await adminPool.query(`CREATE SCHEMA ${schema}`);
-  const dbUrl = new URL(process.env.DATABASE_URL!); dbUrl.searchParams.set('options', `-c search_path=${schema}`); process.env.DATABASE_URL = dbUrl.href;
-  uploads = await mkdtemp(path.join(tmpdir(), 'acv-test-')); process.env.UPLOAD_DIR = uploads;
-  const phrase = 'test test test test test test test test test test test junk';
-  const owner = HDNodeWallet.fromPhrase(phrase, undefined, "m/44'/60'/0'/0/0").connect(provider);
-  const issuer = HDNodeWallet.fromPhrase(phrase, undefined, "m/44'/60'/0'/0/1").connect(provider);
-  const artifact = JSON.parse(await readFile(new URL('../../artifacts/contracts/CertificateVerification.sol/CertificateVerification.json', import.meta.url), 'utf8'));
-  const contract = await new ContractFactory(artifact.abi, artifact.bytecode, new NonceManager(owner)).deploy();
-  await contract.waitForDeployment(); await (await (contract as any).registerIssuer(issuer.address)).wait();
-  process.env.BLOCKCHAIN_RPC_URL = rpc; process.env.CONTRACT_ADDRESS = await contract.getAddress();
-  process.env.OWNER_PRIVATE_KEY = owner.privateKey; process.env.ISSUER_PRIVATE_KEY = issuer.privateKey; process.env.JWT_SECRET = randomBytes(32).toString('hex');
+  const dbUrl = new URL(process.env.DATABASE_URL!);
+  dbUrl.searchParams.set('options', `-c search_path=${schema}`);
+  process.env.DATABASE_URL = dbUrl.href;
+  process.env.JWT_SECRET = randomBytes(32).toString('hex');
   database = (await import('../src/config/database.js')).pool;
   await database.query(await readFile(new URL('../sql/schema.sql', import.meta.url), 'utf8'));
   const { createUser } = await import('../src/services/authService.js');
   for (const role of ['ADMIN', 'ISSUER', 'VERIFIER'] as const) await createUser(role, `${role.toLowerCase()}@example.com`, 'Test-password-42', role);
-  const { app } = await import('../src/app.js'); backendProvider = (await import('../src/services/blockchainService.js')).provider;
+  const { app } = await import('../src/app.js');
+  closeBlockchain = (await import('../src/services/blockchainService.js')).closeDemoBlockchain;
   server = app.listen(0, '127.0.0.1'); await new Promise<void>(resolve => server.once('listening', resolve));
   base = `http://127.0.0.1:${(server.address() as any).port}/api`;
   const login = async (role: string) => (await request('/auth/login', 'POST', { email: `${role}@example.com`, password: 'Test-password-42' })).data.token;
@@ -64,14 +46,14 @@ before(async () => {
 });
 after(async () => {
   if (server) await new Promise<void>(resolve => server.close(() => resolve()));
-  await database?.end(); backendProvider?.destroy(); provider.destroy();
+  await closeBlockchain?.();
+  await database?.end();
   await adminPool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await adminPool.end();
-  if (uploads) await rm(uploads, { recursive: true, force: true });
-  chainProcess?.kill();
 });
+
 test('health checks real services and the browser interface loads', async () => {
   assert.equal((await request('/health')).status, 200);
-  const page = await fetch(base.replace('/api','')); assert.match(await page.text(), /Verify a certificate/);
+  const page = await fetch(base.replace('/api','')); assert.match(await page.text(), /Academic Certificate Verification/);
 });
 test('anonymous users cannot issue, revoke, list, or download certificates', async () => {
   for (const [route, method] of [['/certificates/issue','POST'],['/certificates/revoke','POST'],['/certificates','GET'],[`/certificates/0x${'0'.repeat(64)}/download`,'GET']]) assert.equal((await request(route,method)).status,401);
@@ -87,7 +69,7 @@ test('bad login and malformed input return controlled errors', async () => {
   assert.equal((await request('/certificates/verify','POST')).status,400);
   assert.equal((await request('/certificates/not-a-hash')).status,400);
 });
-test('authorized issuance persists the PDF and blockchain details', async () => {
+test('authorized issuance retains PDF and blockchain details within the current session', async () => {
   const r = await request('/certificates/issue','POST',file(pdf,'ACV-TEST-001'),issuerToken);
   assert.equal(r.status,201,JSON.stringify(r.data)); certificateHash = r.data.certificate.certificateHash;
   assert.match(certificateHash,/^0x[0-9a-f]{64}$/);
@@ -117,22 +99,98 @@ test('admin provisions accounts with validated roles', async () => {
   assert.equal((await request('/auth/users','POST',{name:'New staff',email:'new@example.com',password:'Test-password-42',role:'ISSUER'},adminToken)).status,201);
   assert.equal((await request('/auth/users','POST',{name:'Bad role',email:'bad@example.com',password:'Test-password-42',role:'ROOT'},adminToken)).status,400);
 });
-test('confirmed issuance is recovered after a database save failure', async () => {
-  const recoveryPdf = Buffer.concat([pdf, Buffer.from('\nrecovery-case')]);
-  await database.query(`CREATE FUNCTION fail_certificate_save() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'simulated metadata outage'; END $$;
-    CREATE TRIGGER fail_save BEFORE INSERT ON certificates FOR EACH ROW EXECUTE FUNCTION fail_certificate_save()`);
-  const first = await request('/certificates/issue','POST',file(recoveryPdf,'RECOVER-001'),issuerToken);
-  assert.equal(first.status,503); assert.ok(first.data.certificate.transactionHash);
-  await database.query('DROP TRIGGER fail_save ON certificates');
-  const retry = await request('/certificates/issue','POST',file(recoveryPdf,'RECOVER-001'),issuerToken);
-  assert.equal(retry.status,201,JSON.stringify(retry.data));
-  assert.equal(retry.data.certificate.transactionHash,first.data.certificate.transactionHash);
-  assert.equal((await request('/certificates/verify','POST',file(recoveryPdf))).data.certificate.verificationStatus,'VALID');
+test('certificate metadata and PDFs use memory, while PostgreSQL stores only users', async () => {
+  const recoveryPdf = Buffer.concat([pdf,Buffer.from('second session record')]);
+  const issued = await request('/certificates/issue','POST',file(recoveryPdf,'RECOVER-001'),issuerToken);
+  assert.equal(issued.status,201,JSON.stringify(issued.data));
+  assert.equal((await database.query("SELECT to_regclass('certificates') AS name")).rows[0].name,null);
+  const records = (await request('/certificates','GET',undefined,adminToken)).data.certificates;
+  assert.ok(records.every((record:any) => record.file_data === undefined));
+  assert.equal((await database.query('SELECT count(*) AS count FROM users')).rows[0].count,'4');
 });
+
 test('issuer administration disables and restores issuance', async () => {
   const { blockchain } = (await request('/blockchain')).data;
   assert.equal((await request('/issuers/remove','POST',{issuerAddress:blockchain.issuer},adminToken)).status,200);
   assert.equal((await request('/certificates/issue','POST',file(Buffer.concat([pdf,Buffer.from('disabled')]),'DISABLED'),issuerToken)).status,400);
   assert.equal((await request('/issuers/register','POST',{issuerAddress:blockchain.issuer},adminToken)).status,200);
   assert.equal((await request(`/issuers/${blockchain.issuer}`,'GET',undefined,adminToken)).data.issuer.registered,true);
+});
+
+test('hash-only verification works without uploading a PDF', async () => {
+  const { calculateSHA256 } = await import('../src/services/hashService.js');
+  const r = await request('/certificates/verify/hash','POST',{certificateHash:`0x${calculateSHA256(pdf)}`});
+  assert.equal(r.status,200);
+  assert.equal(r.data.certificate.verificationStatus,'REVOKED');
+  const unknown = await request('/certificates/verify/hash','POST',{certificateHash:`0x${'ab'.repeat(32)}`});
+  assert.equal(unknown.data.certificate.verificationStatus,'INVALID');
+  assert.equal((await request('/certificates/verify/hash','POST',{certificateHash:123})).status,400);
+});
+
+test('academic comparison uses on-chain commitment and normalizes case/spaces', async () => {
+  const input = { certificateId:'RECOVER-001', ...academic, studentName:'  ayush   kumar  ', department:'computer science' };
+  const good = await request('/certificates/verify/details','POST',input);
+  assert.equal(good.status,200,JSON.stringify(good.data));
+  assert.equal(good.data.certificate.detailsMatch,true);
+  assert.equal(good.data.certificate.verificationStatus,'VALID');
+  assert.equal((await request('/certificates/verify/details','POST',{...input,grade:'9.9'})).data.certificate.detailsMatch,false);
+  assert.equal((await request('/certificates/verify/details','POST',{...input,certificateId:'NOT-REGISTERED'})).data.certificate.detailsMatch,false);
+  assert.equal((await request('/certificates/verify/details','POST',{...input,graduationYear:'year'})).status,400);
+  const { getSavedCertificate } = await import('../src/services/certificateStore.js');
+  getSavedCertificate(good.data.certificate.certificateHash)!.academic_details.grade = '9.9';
+  assert.equal((await request('/certificates/verify/details','POST',input)).data.certificate.detailsMatch,true);
+});
+
+test('matching entered details do not authenticate an unrelated PDF', async () => {
+  const result = await request('/certificates/verify/details','POST',{certificateId:'RECOVER-001',...academic});
+  assert.equal(result.data.certificate.detailsMatch,true);
+  const { calculateSHA256 } = await import('../src/services/hashService.js');
+  const unrelated = `0x${calculateSHA256(Buffer.from('unrelated file'))}`;
+  assert.equal((await request('/certificates/verify/hash','POST',{certificateHash:unrelated})).data.certificate.valid,false);
+});
+
+test('issuance requires all academic fields and correction requires admin', async () => {
+  const body = file(Buffer.concat([pdf,Buffer.from('missing-grade')]),'NO-GRADE'); body.delete('grade');
+  assert.equal((await request('/certificates/issue','POST',body,issuerToken)).status,400);
+  assert.equal((await request('/certificates/replace','POST',file(pdf,'NOT-ALLOWED'),issuerToken)).status,403);
+});
+
+let correctedHash: string;
+const correctedDetails = {...academic,grade:'9.0'};
+test('correction supersedes the old version and links both records on-chain', async () => {
+  const old = await request('/certificates/verify/details','POST',{certificateId:'RECOVER-001',...academic});
+  const body = file(Buffer.concat([pdf,Buffer.from('corrected certificate')]),'RECOVER-001-R1',correctedDetails);
+  body.set('previousHash',old.data.certificate.certificateHash);
+  const r = await request('/certificates/replace','POST',body,adminToken);
+  assert.equal(r.status,201,JSON.stringify(r.data)); correctedHash = r.data.certificate.certificateHash;
+  const previous = (await request(`/certificates/${old.data.certificate.certificateHash}`)).data.certificate;
+  const current = (await request(`/certificates/${correctedHash}`)).data.certificate;
+  assert.equal(previous.verificationStatus,'SUPERSEDED'); assert.equal(previous.valid,false); assert.equal(previous.revoked,false);
+  assert.equal(previous.replacementHash,correctedHash); assert.equal(current.previousHash,previous.certificateHash);
+  assert.equal(current.verificationStatus,'VALID');
+  assert.equal((await request('/certificates/verify/details','POST',{certificateId:'RECOVER-001-R1',...correctedDetails})).data.certificate.detailsMatch,true);
+  const oldDetails = (await request('/certificates/verify/details','POST',{certificateId:'RECOVER-001',...academic})).data.certificate;
+  assert.equal(oldDetails.detailsMatch,true); assert.equal(oldDetails.valid,false);
+  assert.ok((await request(`/certificates/audit/${previous.certificateHash}`)).data.history.some((e:any)=>e.type==='SUPERSEDED'));
+  assert.ok((await request(`/certificates/audit/${correctedHash}`)).data.history.some((e:any)=>e.type==='REPLACEMENT'));
+});
+
+test('revoked and superseded records cannot be replaced again', async () => {
+  const body = file(Buffer.concat([pdf,Buffer.from('invalid correction')]),'BAD-CORRECTION');
+  body.set('previousHash',certificateHash); // The original test certificate was revoked.
+  assert.equal((await request('/certificates/replace','POST',body,adminToken)).status,400);
+  const old = (await request(`/certificates/${correctedHash}`)).data.certificate.previousHash;
+  body.set('previousHash',old);
+  assert.equal((await request('/certificates/replace','POST',body,adminToken)).status,400);
+});
+
+test('further corrections update session metadata and preserve the version chain', async () => {
+  const body = file(Buffer.concat([pdf,Buffer.from('second correction')]),'RECOVER-001-R2');
+  body.set('previousHash',correctedHash);
+  const result = await request('/certificates/replace','POST',body,adminToken);
+  assert.equal(result.status,201,JSON.stringify(result.data));
+  const previous = (await request(`/certificates/${correctedHash}`)).data.certificate;
+  assert.equal(previous.verificationStatus,'SUPERSEDED');
+  const { getSavedCertificate } = await import('../src/services/certificateStore.js');
+  assert.equal(getSavedCertificate(correctedHash)!.replacement_hash,result.data.certificate.certificateHash);
 });

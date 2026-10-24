@@ -1,71 +1,47 @@
 import { spawn } from 'node:child_process';
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const backend = path.join(root, 'backend');
-const requireBackend = createRequire(path.join(backend, 'package.json'));
-const dotenv = requireBackend('dotenv');
-const { JsonRpcProvider } = requireBackend('ethers');
-const settings = dotenv.parse(await readFile(path.join(backend, '.env')));
-const rpc = new URL(settings.BLOCKCHAIN_RPC_URL || 'http://127.0.0.1:8545');
-if (!['localhost','127.0.0.1'].includes(rpc.hostname) || rpc.port !== '8545') throw new Error('dev:local requires BLOCKCHAIN_RPC_URL=http://127.0.0.1:8545 in backend/.env');
 const npmCli = process.env.npm_execpath;
-if (!npmCli) throw new Error('Start this script with npm run dev:local');
+if (!npmCli) throw new Error('Start with npm run dev:local');
 const children = new Set();
-function child(args, cwd = root, quiet = false) {
-  const processChild = spawn(process.execPath, args, { cwd, windowsHide: true, stdio: quiet ? 'ignore' : 'inherit' });
+function child(args, cwd = root, extraEnv = {}) {
+  const processChild = spawn(process.execPath, args, { cwd, windowsHide: true, stdio: 'inherit', env: { ...process.env, ...extraEnv } });
   children.add(processChild); processChild.once('exit', () => children.delete(processChild));
   return processChild;
 }
 async function run(args, cwd = root) {
   const processChild = child(args, cwd);
-  await new Promise((resolve, reject) => { processChild.once('error', reject); processChild.once('exit', code => code === 0 ? resolve() : reject(new Error(`Setup step failed (exit ${code})`))); });
-}
-async function rpcReady() {
-  try {
-    const response = await fetch(rpc, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_chainId',params:[]}), signal: AbortSignal.timeout(1500) });
-    const data = await response.json(); return data.result === '0x7a69';
-  } catch { return false; }
+  await new Promise((resolve, reject) => {
+    processChild.once('error', reject);
+    processChild.once('exit', code => code === 0 ? resolve() : reject(new Error(`Setup step failed (exit ${code})`)));
+  });
 }
 function stop() { for (const processChild of children) processChild.kill(); }
 process.on('SIGINT', () => { stop(); process.exit(0); });
 process.on('SIGTERM', () => { stop(); process.exit(0); });
 try {
-  console.log('Preparing the local certificate verification application…');
+  console.log('Starting a fresh demo. User accounts are retained; certificates exist only until this backend stops.');
   await run([npmCli, 'run', 'build']);
   await run(['scripts/sync-abi.mjs']);
   await run([npmCli, 'run', 'db:setup'], backend);
   await run([npmCli, 'run', 'create-admin'], backend);
-  if (!await rpcReady()) {
-    child(['node_modules/hardhat/dist/src/cli.js', 'node', '--hostname', '127.0.0.1'], root, true);
-    let ready = false;
-    for (let i=0;i<100;i++) { if (await rpcReady()) { ready = true; break; } await new Promise(resolve => setTimeout(resolve,200)); }
-    if (!ready) throw new Error('Could not start Hardhat on port 8545. Check for another process using that port.');
-  }
-  const provider = new JsonRpcProvider(rpc.href);
-  let deployed = false;
-  try { deployed = !!settings.CONTRACT_ADDRESS && (await provider.getCode(settings.CONTRACT_ADDRESS)) !== '0x'; } finally { provider.destroy(); }
-  if (!deployed) await run(['node_modules/hardhat/dist/src/cli.js','run','scripts/deploy.ts','--network','localhost','--no-compile']);
-  await run([npmCli,'run','build'], backend);
-  console.log('Open http://localhost:' + (settings.PORT || 5000) + '. Staff sign-in uses your existing ADMIN_EMAIL and ADMIN_PASSWORD.');
+  await run([npmCli, 'run', 'build'], backend);
   if (process.argv.includes('--check')) {
-    child(['dist/server.js'], backend);
+    const processChild = child(['dist/server.js'], backend, { PORT: '15000' });
     let healthy = false;
-    let lastStatus = 'No HTTP response';
-    for (let i=0;i<30;i++) {
+    for (let i = 0; i < 60; i++) {
+      if (processChild.exitCode !== null) throw new Error('Demo backend stopped before it became ready');
       try {
-        const response = await fetch(`http://127.0.0.1:${settings.PORT || 5000}/api/health`, { signal: AbortSignal.timeout(3000) });
-        if (response.ok) { healthy = true; break; }
-        lastStatus = JSON.stringify(await response.json());
-      } catch (error) { lastStatus = error.message; }
+        const response = await fetch('http://127.0.0.1:15000/api/health', { signal: AbortSignal.timeout(2000) });
+        const health = await response.json();
+        if (response.ok && health.applicationVersion === 3 && health.certificateStorage === 'memory' && health.certificateCount === 0) { healthy = true; break; }
+      } catch {}
       await new Promise(resolve => setTimeout(resolve, 300));
     }
-    if (!healthy) throw new Error(`The application did not become healthy: ${lastStatus}`);
-    console.log('Local startup check passed: database, contract and API are connected.');
-  } else {
-    await run(['dist/server.js'], backend);
-  }
+    if (!healthy) throw new Error('The fresh demo backend did not become healthy');
+    console.log('Fresh demo startup passed: zero certificates, temporary blockchain, persistent user database.');
+  } else { await run(['dist/server.js'], backend); }
 } catch (error) { console.error(error.message); process.exitCode = 1; }
 finally { stop(); }
